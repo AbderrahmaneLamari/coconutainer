@@ -3,109 +3,74 @@ package runtime
 import (
     "fmt"
     "os"
-    "path/filepath"
+    "os/exec"
     "syscall"
 
     "github.com/opencontainers/runc/libcontainer"
+    "github.com/opencontainers/runc/libcontainer/console"
+    "github.com/opencontainers/runc/libcontainer/utils"
     "github.com/opencontainers/runc/libcontainer/configs"
+
+    "coconutainer/types"
 )
 
-// Runtime is a wrapper around "libcontainer.Factory"
-// It's responsible for creating, running, stopping and deleting containers
+func RunContainer(cfg *types.ContainerConfig) error {
+    // 1. Convert high-level config → libcontainer config
+    lcCfg, err := cfg.ToLibcontainerConfig()
+    if err != nil {
+        return fmt.Errorf("invalid config: %w", err)
+    }
 
-// Declaring a runtime type
+    // 2. Create a factory storing state in /run/coco
+    factory, err := libcontainer.New(
+        "/run/coco",
+        libcontainer.Cgroupfs,
+    )
+    if err != nil {
+        return fmt.Errorf("factory error: %w", err)
+    }
 
-type Runtime struct {
-	factory 	libcontainer.Factory
-	baseDir 	string
-}
+    // 3. Create container instance
+    container, err := factory.Create(cfg.ID, lcCfg)
+    if err != nil {
+        return fmt.Errorf("create error: %w", err)
+    }
 
-func NewRuntime(baseDir string) (*Runtime, error){
-	// Let's ensure runtime state directory exisits
+    // Prepare arguments (command executed inside container)
+    process := &libcontainer.Process{
+        Args:   cfg.Cmd,
+        Env:    append(os.Environ(), "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/bin"),
+        User:   "0:0",
+        Cwd:    "/",
+        Stdin:  os.Stdin,
+        Stdout: os.Stdout,
+        Stderr: os.Stderr,
+    }
 
-	err := os.Mkdir(baseDir, 0755);
-	if err != nil {
-		return nil, err
-	}
+    // 4. Setup console (TTY)
+    console, err := console.NewPty()
+    if err != nil {
+        return fmt.Errorf("pty error: %w", err)
+    }
+    process.ConsoleSocket = console
 
-	// Creating the libcontainer factory
-	factory, err := libcontainer.New(baseDir, libcontainer.Cgroups, libcontainer.InitArgs(os.Args[0], "init"));
+    // 5. Start the container process
+    if err := container.Start(process); err != nil {
+        return fmt.Errorf("start error: %w", err)
+    }
 
-	if err != nil{
-		return nil, fmt.Errorf("Failed to create factory: %v", err);
-	}
+    // 6. Wait for container process to exit
+    status, err := process.Wait()
+    if err != nil {
+        return fmt.Errorf("wait error: %w", err)
+    }
 
+    fmt.Printf("Container exited with: %v\n", status)
 
-	return &Runtime{
-		factory: factory,
-		baseDir: baseDir,
-	}, nil
+    // 7. Destroy container (delete cgroups, state dir)
+    if err := container.Destroy(); err != nil {
+        return fmt.Errorf("destroy error: %w", err)
+    }
 
-}
-
-func (r *Runtime) CreateContainer(cfg *ContainerConfig) (libcontainer.Container, error){
-
-	libCfg, err := cfg.ToLibcontainerConfig();
-
-	if err != nil{
-		return nil, err;
-	}
-
-	container, err := r.factory.Create(cfg.ID, libCfg);
-
-	if err != nil {
-		return nil, fmt.Errorf("Failed to Create container: %v", err);
-	}
-
-	return container, nil;
-}
-
-func (r* Runtime) StartContainer(container libcontainer.Container, cfg ContainerConfig) error {
-	process := &libcontainer.Process{
-		Args: cfg.Cmd,
-		Env: []string{"PATH=/bin:/sbin:/usr/bin:/usr/sbin"},
-		Cwd: "/",
-		Stdin: os.Stdin,
-		Stdout: os.Stdout,
-		Stderr: os.Stderr,
-	}
-	fmt.Printf("[coconutainer] starting container %s ...", cfg.ID);
-
-
-	err := container.Run(process);
-
-	if err != nil {
-		return fmt.Errorf("Failed to run process: %v", err);
-	}
-
-	_, err := process.Wait()
-	return err;
-	
-}
-
-
-func (r *Runtime) StopContainer(container libcontainer.Container) error {
-
-	procs, err := container.Processes()
-
-	if err != nil {
-		return err
-	}
-
-	for _, pid := range procs {
-		syscall.kill(pid, syscall.SIGTERM);
-	}
-
-	return nil;
-}
-
-func (r *Runtime) DestroyContainer(container libcontainer.Container) error {
-	
-	err := container.Destroy();
-
-	if err != nil {
-		return fmt.Errorf("Failed to Destroy Container: %v", err);
-	}
-	
-	return nil;
+    return nil
 }
