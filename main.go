@@ -123,7 +123,7 @@ func main() {
 			},
 		},
 	}
-	container, err := libcontainer.Create("/run/containers", "jaouad", config)
+	container, err := libcontainer.Create("/run/containers-test-dir", "jaouad", config)
 	if err != nil {
 		panic(err)
 	}
